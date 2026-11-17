@@ -134,3 +134,93 @@ def test_scale_matched_field_index_sum():
     V = V / np.linalg.norm(V, axis=1)[:, None]
     D, info = scalefield.scale_matched_field(V, np.asarray(T), h=0.2)
     assert info['index_sum'] == 8                             # 4 x Euler characteristic of a sphere
+
+
+def test_fill_new_holes_closes_remesh_gaps():
+    """QuadWild occasionally leaves one patch unfilled; holes the input did not have are closed with quads."""
+    from rqmesh import repair
+    V, F = torus(40, 20)
+    m = 20
+    holes = {5, 6, m + 5, m + 6} | {20 * m + 8, 20 * m + 9, 21 * m + 8, 21 * m + 9, 22 * m + 8, 22 * m + 9}
+    F_cut = [f for i, f in enumerate(F) if i not in holes]
+    F2, info = repair.fill_new_holes(V, F, V, F_cut)
+    assert info['holes_new'] == 2 and info['filled_triangles'] == 0
+    nb, e = _valence(F2)
+    assert all(c == 2 for c in e.values())                   # closed again
+    dirs = collections.Counter((f[k], f[(k + 1) % len(f)]) for f in F2 for k in range(len(f)))
+    assert max(dirs.values()) == 1                           # consistent orientation
+
+
+def test_edited_ngon_grid_recovers_its_ngons():
+    """Hard-surface round trip: an n-gon cylinder gridded by one simple subdivision, bent, comes back with its
+    32-sided caps.  The shape prior prefers the all-quad reading; it must not win when that reading cannot pass as
+    a subdivision (fit > 2 LEVEL_TOL) and the true one fits within LEVEL_TOL."""
+    from rqmesh import subdiv
+    n = 32
+    a = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    V = np.array([[np.cos(t), np.sin(t), z] for z in (-1.0, 1.0) for t in a])
+    F = [[i, (i + 1) % n, n + (i + 1) % n, n + i] for i in range(n)]
+    F += [list(range(n - 1, -1, -1)), list(range(n, 2 * n))]
+    Vd, Fd = subdiv.resubdivide(V, F, 'simple', 1)
+    Vd = np.asarray(Vd, float)
+    a45 = np.radians(45.0); R = 2.0 / a45                     # bend 45 degrees across the cylinder
+    th = a45 * (Vd[:, 0] + 1) / 2
+    Vb = np.c_[(R + Vd[:, 2]) * np.sin(th), Vd[:, 1], (R + Vd[:, 2]) * np.cos(th) - R]
+    r = subdiv.unsubdivide(Vb, Fd, tol=None, levels=1)
+    cF = r['cage'][1]
+    assert sorted(len(f) for f in cF) == [4] * n + [n, n]
+    assert {frozenset(r['orig'][v] for v in f) for f in cF} == {frozenset(f) for f in F}
+
+
+def _inset_quad(V, F, fi, t=0.25):
+    """Inset one quad (a topology edit): four inner vertices, the face replaced by five."""
+    V = np.asarray(V, float); f = F[fi]; c = V[f].mean(0)
+    inner = [len(V) + k for k in range(4)]
+    V = np.vstack([V, [V[v] + t * (c - V[v]) for v in f]])
+    G = [g for i, g in enumerate(F) if i != fi] + [list(inner)]
+    G += [[f[k], f[(k + 1) % 4], inner[(k + 1) % 4], inner[k]] for k in range(4)]
+    return V, G
+
+
+def _valid_mesh(F):
+    und, dirs = collections.Counter(), collections.Counter()
+    for f in F:
+        for k in range(len(f)):
+            a, b = f[k], f[(k + 1) % len(f)]; und[(min(a, b), max(a, b))] += 1; dirs[(a, b)] += 1
+    return max(und.values()) <= 2 and max(dirs.values()) == 1, sum(c == 1 for c in und.values())
+
+
+def test_partial_recover_keeps_edited_parts():
+    """After a topology edit the global Recover finds nothing; partial Recover peels the rest of the grid and keeps
+    the edited part, joined without holes, flips or T-junctions."""
+    from rqmesh import subdiv, partial
+    n = 32
+    a = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    V = np.array([[np.cos(t), np.sin(t), z] for z in (-1.0, 1.0) for t in a])
+    F = [[i, (i + 1) % n, n + (i + 1) % n, n + i] for i in range(n)] + [list(range(n - 1, -1, -1)), list(range(n, 2 * n))]
+    Vd, Fd = subdiv.resubdivide(V, F, 'simple', 1)
+    r = partial.unsubdivide_partial(Vd, Fd)                     # unedited: the same as the global Recover
+    assert sorted(len(f) for f in r['F']) == [4] * n + [n, n]
+    side = next(i for i, f in enumerate(Fd) if all(abs(Vd[v][2]) < 1.0 + 1e-9 for v in f) and
+                len({round(Vd[v][2], 6) for v in f}) == 2)      # a quad on the side wall
+    Ve, Fe = _inset_quad(Vd, [list(f) for f in Fd], side)
+    assert not subdiv.unsubdivide(Ve, Fe, tol=None, levels=1)['levels']
+    r = partial.unsubdivide_partial(Ve, Fe)
+    ok, nb = _valid_mesh(r['F'])
+    assert ok and nb == 0
+    got = {frozenset(v for v in (r['orig'][u] for u in f) if v < len(V)) for f in r['F']}
+    assert sum(frozenset(f) in got for f in F) >= 33               # all cage faces but the edited one
+    for f, cs in zip(r['F'], r['corner_src']):                    # every corner points at its own input corner
+        assert [r['orig'][u] for u in f] == [Fe[g][k] for g, k in cs]
+
+
+def test_partial_recover_two_levels_catmull_clark():
+    from rqmesh import subdiv, partial
+    V, F = torus(12, 8)
+    Vd, Fd = subdiv.resubdivide(V, F, 'cc', 2)
+    Ve, Fe = _inset_quad(Vd, [list(f) for f in Fd], 0)
+    r = partial.unsubdivide_partial(Ve, Fe, levels=2)
+    ok, nb = _valid_mesh(r['F'])
+    assert ok and nb == 0 and len(r['levels']) == 2
+    got = {frozenset(v for v in (r['orig'][u] for u in f) if v < len(V)) for f in r['F']}
+    assert sum(frozenset(f) in got for f in F) >= 0.9 * len(F)
