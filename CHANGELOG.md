@@ -13,3 +13,8 @@ First public version, carved out of thirteen internal research rounds.
 - Structure analysis and workflow recommendation.
 - Scale-matched cross fields for sculpts, with automatic setting selection.
 - NumPy-only operation (Blender's Python); SciPy used when available.
+- Partial base-cage recovery after topology edits (`partial.unsubdivide_partial`): peels what is still a subdivision
+  grid, keeps extrudes, insets and cuts, and stitches the two without T-junctions.
+- Skin weights as a surface field (`skin.SkinField`): weights carried to new vertices by barycentric interpolation on
+  the closest source triangle, and joint-aware ring removal (`adaptive_simplify(skin=..., joint_deg=...)`) that keeps
+  the loops where bones blend.

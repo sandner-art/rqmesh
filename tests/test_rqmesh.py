@@ -5,8 +5,9 @@ import pytest
 
 from conftest import cube, torus, icosahedron, plate_with_hole, polar_annulus
 
-MODULES = ['analyze', 'compat', 'crease_split', 'defofield', 'features', 'isolation', 'meshio_min', 'repair', 'rosy',
-           'scalefield', 'strip_bounds', 'structsimp', 'subdiv', 'subdiv_tri', 'symmetry', 'topofix', 'transitions']
+MODULES = ['analyze', 'compat', 'crease_split', 'defofield', 'features', 'isolation', 'meshio_min', 'partial', 'repair',
+           'rosy', 'scalefield', 'skin', 'strip_bounds', 'structsimp', 'subdiv', 'subdiv_tri', 'symmetry', 'topofix',
+           'transitions']
 
 
 def _valence(F):
@@ -34,6 +35,9 @@ def test_numpy_only():
             "Vs, Fs = subdiv.resubdivide(V, F, 'cc', 2)\n"
             "r = subdiv.unsubdivide(Vs, Fs)\n"
             "assert len(r['cage'][1]) == 6, len(r['cage'][1])\n"
+            "from rqmesh.skin import SkinField\n"
+            "W = np.stack([(V[:, 0] + 1) / 2, (1 - V[:, 0]) / 2], 1)\n"
+            "assert np.allclose(SkinField(V, F, W).at(V), W)\n"
             "print('ok')\n")
     env = dict(os.environ, RQM_NO_SCIPY='1')
     out = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, env=env)
@@ -224,3 +228,42 @@ def test_partial_recover_two_levels_catmull_clark():
     assert ok and nb == 0 and len(r['levels']) == 2
     got = {frozenset(v for v in (r['orig'][u] for u in f) if v < len(V)) for f in r['F']}
     assert sum(frozenset(f) in got for f in F) >= 0.9 * len(F)
+
+
+def _skinned_tube(n=64, m=16, band=0.1):
+    """Open tube along z, two bones blending over |z| < band (an elbow)."""
+    z = np.linspace(-1, 1, n); t = np.linspace(0, 2 * np.pi, m, endpoint=False)
+    V = np.array([[0.25 * np.cos(a), 0.25 * np.sin(a), zz] for zz in z for a in t])
+    F = [[i * m + j, i * m + (j + 1) % m, (i + 1) * m + (j + 1) % m, (i + 1) * m + j]
+         for i in range(n - 1) for j in range(m)]
+    wb = np.clip((V[:, 2] + band) / (2 * band), 0, 1)
+    return V, F, np.stack([1 - wb, wb], 1)
+
+
+def test_skin_field_interpolates_weights():
+    """Weights linear along the tube are carried exactly: barycentric on the closest input triangle."""
+    from rqmesh.skin import SkinField
+    V, F, _ = _skinned_tube()
+    W = np.stack([(V[:, 2] + 1) / 2, (1 - V[:, 2]) / 2], 1)
+    sk = SkinField(V, F, W)
+    assert np.allclose(sk.at(V), W, atol=1e-12)                       # exact at the vertices
+    rng = np.random.default_rng(1); f = rng.integers(len(F), size=200); r = rng.random((200, 1))
+    P = V[[F[k][0] for k in f]] * (1 - r) + V[[F[k][2] for k in f]] * r   # points on face diagonals
+    assert np.allclose(sk.at(P), np.stack([(P[:, 2] + 1) / 2, (1 - P[:, 2]) / 2], 1), atol=1e-9)
+    assert np.allclose(sk.dw(V[:5], V[:5]), 0) and np.isclose(sk.dw(V[:1], V[-1:])[0], 1.0)
+
+
+def test_simplify_keeps_joint_loops():
+    """With skin weights the ring removal keeps the loops where the bones blend (round 17)."""
+    from rqmesh import transitions
+    from rqmesh.skin import SkinField
+    V, F, W = _skinned_tube()
+    counts = []
+    for sk in (None, SkinField(V, F, W)):
+        V2, F2, *_ = transitions.adaptive_simplify(V, F, len(F) // 4, feature_deg=35, skin=sk)
+        zs = np.unique(np.round(V2[:, 2], 4))
+        counts.append((len(F2), int((np.abs(zs) <= 0.15).sum())))
+    (f0, in0), (f1, in1) = counts
+    assert f0 == f1                                                   # same budget
+    assert in1 > in0          # loops at the elbow: 4 vs 2 with SciPy, 3 vs 2 NumPy-only (ties on the symmetric
+                              # tube break differently)
