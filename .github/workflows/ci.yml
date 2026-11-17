@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.11', '3.13']
+        scipy: [with-scipy, numpy-only]
+        exclude:
+          - { os: windows-latest, scipy: numpy-only }
+          - { os: macos-latest, scipy: numpy-only }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '${{ matrix.python }}' }
+      - name: install
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ matrix.scipy }}" = "with-scipy" ]; then pip install -e .[test,scipy]; else pip install -e .[test]; fi
+      - name: pytest
+        run: python -m pytest -q
+      - name: example
+        run: python examples/simplify_and_fix.py

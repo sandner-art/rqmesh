@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rqmesh"
+version = "0.1.0"
+description = "Structure-aware quad remeshing, simplification and retopology (pure Python + NumPy)"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Daniel Sandner" }]
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
+keywords = ["quad mesh", "remeshing", "retopology", "geometry processing", "blender", "subdivision"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Graphics :: 3D Modeling",
+  "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.optional-dependencies]
+scipy = ["scipy>=1.10"]
+test = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/sandner-art/rqmesh"
+Issues = "https://github.com/sandner-art/rqmesh/issues"
+"Blender add-on" = "https://github.com/sandner-art/rqmesh-blender"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rqmesh"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/rqmesh", "tests", "examples", "README.md", "CHANGELOG.md", "CITATION.cff", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
