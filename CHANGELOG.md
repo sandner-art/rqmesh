@@ -18,3 +18,6 @@ First public version, carved out of thirteen internal research rounds.
 - Skin weights as a surface field (`skin.SkinField`): weights carried to new vertices by barycentric interpolation on
   the closest source triangle, and joint-aware ring removal (`adaptive_simplify(skin=..., joint_deg=...)`) that keeps
   the loops where bones blend.
+- Rigging of rigid-part models (`rigid_rig.analyze`): parts (pieces, welded pieces split at concave creases, details
+  merged), joints with kind, pivot and axis from pins, spheres, rods in sleeves, turntables, hinge lines and rails,
+  pistons, helper geometry, and the bone hierarchy. NumPy-only.

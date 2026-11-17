@@ -6,7 +6,7 @@ import pytest
 from conftest import cube, torus, icosahedron, plate_with_hole, polar_annulus
 
 MODULES = ['analyze', 'compat', 'crease_split', 'defofield', 'features', 'isolation', 'meshio_min', 'partial', 'repair',
-           'rosy', 'scalefield', 'skin', 'strip_bounds', 'structsimp', 'subdiv', 'subdiv_tri', 'symmetry', 'topofix',
+           'rigid_rig', 'rosy', 'scalefield', 'skin', 'strip_bounds', 'structsimp', 'subdiv', 'subdiv_tri', 'symmetry', 'topofix',
            'transitions']
 
 
@@ -267,3 +267,71 @@ def test_simplify_keeps_joint_loops():
     assert f0 == f1                                                   # same budget
     assert in1 > in0          # loops at the elbow: 4 vs 2 with SciPy, 3 vs 2 NumPy-only (ties on the symmetric
                               # tube break differently)
+
+
+def _rr_box(c, s):
+    c = np.asarray(c, float); s = np.asarray(s, float) / 2
+    V = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]) * s + c
+    return V, [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]]
+
+
+def _rr_cyl(c, r, L, axis, n=24):
+    a = np.asarray(axis, float); a /= np.linalg.norm(a)
+    e1 = np.cross(a, [0.3, 0.2, 0.9]); e1 /= np.linalg.norm(e1); e2 = np.cross(a, e1)
+    t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    V = np.array([np.asarray(c) + h * a + r * (np.cos(x) * e1 + np.sin(x) * e2) for h in (-L / 2, L / 2) for x in t])
+    return V, [[k, (k + 1) % n, n + (k + 1) % n, n + k] for k in range(n)] + [list(range(n))[::-1], list(range(n, 2 * n))]
+
+
+def _rr_sphere(c, r, seg=24, rings=12):
+    V = [np.asarray(c) + [0, 0, -r]]
+    for i in range(1, rings):
+        th = np.pi * i / rings - np.pi / 2
+        V += [np.asarray(c) + r * np.array([np.cos(th) * np.cos(p), np.cos(th) * np.sin(p), np.sin(th)])
+              for p in np.linspace(0, 2 * np.pi, seg, endpoint=False)]
+    V.append(np.asarray(c) + [0, 0, r]); top = len(V) - 1
+    ring = lambda i, k: 1 + (i - 1) * seg + k % seg
+    F = [[0, ring(1, k + 1), ring(1, k)] for k in range(seg)]
+    F += [[ring(i, k), ring(i, k + 1), ring(i + 1, k + 1), ring(i + 1, k)] for i in range(1, rings - 1) for k in range(seg)]
+    F += [[ring(rings - 1, k), ring(rings - 1, k + 1), top] for k in range(seg)]
+    return np.array(V), F
+
+
+def _rr_join(parts):
+    V, F, off = [], [], 0
+    for v, f in parts:
+        V.append(v); F += [[i + off for i in q] for q in f]; off += len(v)
+    return np.vstack(V), F
+
+
+@pytest.mark.parametrize('case', ['pin', 'slide', 'ball'])
+def test_rigid_rig_joint_kinds(case):
+    """Rig Hard Surface analysis (round 18): a pin makes a hinge about its axis, a rod entering a sleeve a slide along
+    it, a sphere between two parts a ball joint at its centre."""
+    from rqmesh import rigid_rig as RR
+    base = _rr_box((0, 0, 0.1), (1.2, 1.2, 0.2))
+    if case == 'pin':
+        parts = [base, _rr_box((0, 0, 0.6), (0.3, 0.3, 0.8)), _rr_cyl((0, 0, 1.0), 0.06, 0.6, (0, 1, 0)),
+                 _rr_box((0, 0, 1.45), (0.25, 0.25, 0.8))]
+        want, axis, pivot = 'hinge', (0, 1, 0), (0, 0, 1.0)
+    elif case == 'slide':
+        parts = [base, _rr_cyl((0, 0, 0.6), 0.12, 0.8, (0, 0, 1)), _rr_cyl((0, 0, 1.2), 0.07, 0.9, (0, 0, 1)),
+                 _rr_box((0, 0, 1.65), (0.8, 0.8, 0.1))]
+        want, axis, pivot = 'slide', (0, 0, 1), None
+    else:
+        parts = [base, _rr_box((0, 0, 0.55), (0.14, 0.14, 0.9)), _rr_sphere((0, 0, 1.05), 0.1),
+                 _rr_box((0, 0, 1.5), (0.1, 0.1, 0.8))]
+        want, axis, pivot = 'ball', None, (0, 0, 1.05)
+    V, F = _rr_join(parts)
+    r = RR.analyze(V, F)
+    moving = [j for b, j in r['joint'].items() if j['kind'] != 'root']
+    assert [j['kind'] for j in moving] == [want], [(j['kind'], j['evidence']) for j in moving]
+    j = moving[0]
+    if axis is not None:
+        assert abs(abs(np.asarray(j['axis']) @ np.asarray(axis)) - 1) < 1e-6
+    if pivot is not None:
+        d = np.asarray(j['pivot']) - pivot
+        if axis is not None:
+            d = d - (d @ np.asarray(axis, float)) * np.asarray(axis, float)
+        assert np.linalg.norm(d) < 1e-3
+    assert (r['face_body'] >= 0).all() and len(set(r['face_body'])) == 2       # every face rigidly in one of 2 parts
