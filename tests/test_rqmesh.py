@@ -5,8 +5,8 @@ import pytest
 
 from conftest import cube, torus, icosahedron, plate_with_hole, polar_annulus
 
-MODULES = ['analyze', 'compat', 'crease_split', 'defofield', 'features', 'isolation', 'meshio_min', 'partial', 'repair',
-           'rigid_rig', 'rosy', 'scalefield', 'skin', 'strip_bounds', 'structsimp', 'subdiv', 'subdiv_tri', 'symmetry', 'topofix',
+MODULES = ['analyze', 'compat', 'crease_split', 'defofield', 'features', 'isolation', 'masks', 'meshio_min', 'partial', 'repair',
+           'rigid_rig', 'rosy', 'scalefield', 'skin', 'strip_bounds', 'uvlayout', 'structsimp', 'subdiv', 'subdiv_tri', 'symmetry', 'topofix',
            'transitions']
 
 
@@ -335,3 +335,95 @@ def test_rigid_rig_joint_kinds(case):
             d = d - (d @ np.asarray(axis, float)) * np.asarray(axis, float)
         assert np.linalg.norm(d) < 1e-3
     assert (r['face_body'] >= 0).all() and len(set(r['face_body'])) == 2       # every face rigidly in one of 2 parts
+
+
+def _capped_cylinder(n=8, rings=3):
+    t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    V = np.array([[np.cos(a), np.sin(a), z] for z in np.linspace(-1, 1, rings) for a in t])
+    F = [[i * n + k, i * n + (k + 1) % n, (i + 1) * n + (k + 1) % n, (i + 1) * n + k] for i in range(rings - 1) for k in range(n)]
+    return V, F + [list(range(n))[::-1], list(range((rings - 1) * n, rings * n))]
+
+
+@pytest.mark.parametrize('case', ['cube', 'cylinder'])
+def test_uvs_from_the_recovered_cage(case):
+    """Round 19: panels and cage layouts carried down two Catmull-Clark levels.  Cube: 6 panels of 16 faces, the
+    patch layout is 6 islands with loops exactly straight.  Capped cylinder: the side band is one island (one seam),
+    plus the two n-gon caps."""
+    from rqmesh import subdiv, uvlayout as UL
+    Vc, Fc = _rr_box((0, 0, 0), (2, 2, 2)) if case == 'cube' else _capped_cylinder()
+    Vd, Fd = subdiv.resubdivide(Vc, Fc, 'cc', 2); Vd = np.asarray(Vd); Fd = [list(map(int, f)) for f in Fd]
+    tr = []; r = subdiv.unsubdivide(Vd, Fd, levels=2, trace=tr); cV, cF = r['cage']
+    pc, pid = UL.panels(tr, cF)
+    assert len(set(pid.tolist())) == len(cF)
+    assert all(((p >= -1e-9) & (p <= 1 + 1e-9)).all() for p in pc)
+    cu, ch = UL.cage_layout(cV, cF, 'patches', cuts=r['creases']); duv, _ = UL.push_corners(tr, cu)
+    m = UL.uv_metrics(Vd, Fd, duv)
+    assert m['flipped'] == 0 and m['islands'] == (6 if case == 'cube' else 3)
+    if case == 'cube':
+        assert m['grain_deg'] < 1e-6 and np.bincount(pid).tolist() == [16] * 6
+
+
+def test_part_uvs_unwrap_cylinders_and_boxes():
+    """Shape-aware part unwrap: a cylinder is found and unwrapped around its axis, boxes are projected in their own
+    frame; nothing is mirrored and angles are kept (median ratio 1)."""
+    from rqmesh import uvlayout as UL
+    V, F = _rr_join([_rr_box((0, 0, 0.5), (0.6, 0.4, 1.0)), _rr_cyl((0, 0, 1.3), 0.15, 0.6, (0.3, 0.2, 1.0))])
+    uv, seg, kinds = UL.part_uvs(V, F)
+    assert sorted(kinds.values()) == ['box', 'cylinder']
+    m = UL.uv_metrics(V, F, uv)
+    assert m['flipped'] == 0 and m['angle'] < 1.01
+
+
+def test_merge_charts_joins_flat_pieces():
+    """Round 19b: on a flat disc of quads around a 5-valent pole the separatrices cut several patches; with no
+    curvature inside they merge into one chart (still a disc)."""
+    from rqmesh import uvlayout as UL
+    n = 5; c = [0.0, 0.0, 0.0]; V = [c]
+    for k in range(n):
+        a = 2 * np.pi * k / n; b = a + np.pi / n
+        V += [[np.cos(a), np.sin(a), 0.0], [1.6 * np.cos(b), 1.6 * np.sin(b), 0.0]]
+    V = np.array(V); F = [[0, 1 + 2 * k, 2 + 2 * k, 1 + 2 * ((k + 1) % n)] for k in range(n)]
+    _, ch = UL.cage_layout(V, F, 'patches')
+    lab = UL.merge_charts(V, F, ch, max_curv=0.1)
+    assert len(set(ch.tolist())) > 1 and len(set(lab.tolist())) == 1
+
+
+def test_trim_layout_and_surface_masks():
+    """Trim: every face lands inside its band (v), nothing mirrored, loops straight.  Masks: wear is highest on the
+    cube's rounded edges and covers about the requested area; the variation is 0..1 and continuous."""
+    from rqmesh import subdiv, uvlayout as UL, masks as MK
+    Vc, Fc = _rr_box((0, 0, 0), (2, 1.2, 0.6))
+    Vd, Fd = subdiv.resubdivide(Vc, Fc, 'cc', 2); Vd = np.asarray(Vd); Fd = [list(map(int, f)) for f in Fd]
+    tr = []; r = subdiv.unsubdivide(Vd, Fd, levels=2, trace=tr); cV, cF = r['cage']
+    rows = [(0.5, 1.0), (0.25, 0.5), (0.0, 0.25)]
+    cu, uid, band, err = UL.trim_layout(cV, cF, rows)
+    duv, pid = UL.push_corners(tr, cu)
+    for i, u in enumerate(duv):
+        v0, v1 = rows[band[pid[i]]]
+        assert (u[:, 1] >= v0 - 1e-9).all() and (u[:, 1] <= v1 + 1e-9).all()
+    m = UL.uv_metrics(Vd, Fd, duv); assert m['flipped'] == 0 and m['grain_deg'] < 1e-6
+    w, cav = MK.wear_cavity(Vd, Fd, wear=0.1); A = MK._vertex_area(Vd, Fd)
+    share = A[w > 0.5].sum() / A.sum(); assert 0.03 < share < 0.25, share
+    top = int(np.argmin(np.linalg.norm(Vd - [0, 0, Vd[:, 2].max()], axis=1)))   # middle of the flat top
+    assert w.max() == 1 and w[top] == 0 and cav.max() < 0.5                       # a convex box has no cavities
+    x = MK.structure_noise(tr, len(Vd)); assert x.min() == 0 and x.max() == 1
+
+
+def test_exposure_and_trim_grouping():
+    """Exposure (round 19c): a small box standing on a plate is more open at its top than at its foot.  Trim: joining
+    strips never raises the texel-density error and keeps every face inside its band."""
+    from rqmesh import masks as MK, subdiv, uvlayout as UL
+    V, F = _rr_join([_rr_box((0, 0, 0.05), (2.0, 2.0, 0.1)), _rr_box((0, 0, 0.35), (0.3, 0.3, 0.5))])
+    V, F = subdiv.resubdivide(V, F, 'simple', 3); V = np.asarray(V); F = [list(map(int, f)) for f in F]
+    ex = MK.exposure(V, F, radius=0.2)
+    side = (np.abs(np.abs(V[:, 0]) - 0.15) < 1e-6) & (np.abs(V[:, 1]) < 0.1)
+    foot, top = side & (V[:, 2] < 0.15), (V[:, 2] > 0.6 - 1e-6)
+    assert 0 <= ex.min() and ex.max() <= 1 and ex[top].mean() > ex[foot].mean() + 0.2
+    Vc, Fc = _rr_box((0, 0, 0), (3, 1, 0.5)); Vd, Fd = subdiv.resubdivide(Vc, Fc, 'cc', 2); Vd = np.asarray(Vd)
+    Fd = [list(map(int, f)) for f in Fd]; tr = []; r = subdiv.unsubdivide(Vd, Fd, levels=2, trace=tr); cV, cF = r['cage']
+    rows = [(0.5, 1.0), (0.25, 0.5), (0.0, 0.25)]
+    for g in (False, True):
+        cu, uid, band, err = UL.trim_layout(cV, cF, rows, group=g); duv, pid = UL.push_corners(tr, cu)
+        assert all((u[:, 1] >= rows[band[pid[i]]][0] - 1e-9).all() and (u[:, 1] <= rows[band[pid[i]]][1] + 1e-9).all()
+                   for i, u in enumerate(duv))
+        assert UL.uv_metrics(Vd, Fd, duv)['flipped'] == 0

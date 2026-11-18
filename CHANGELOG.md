@@ -21,3 +21,12 @@ First public version, carved out of thirteen internal research rounds.
 - Rigging of rigid-part models (`rigid_rig.analyze`): parts (pieces, welded pieces split at concave creases, details
   merged), joints with kind, pivot and axis from pins, spheres, rods in sleeves, turntables, hinge lines and rails,
   pistons, helper geometry, and the bone hierarchy. NumPy-only.
+- UVs from structure (`uvlayout`): values carried down the subdivision levels (`push_corners`, `panels`), cage
+  layouts ('panels', 'patches' traced from poles, n-gons and creases), a shape-aware part unwrap (`part_uvs`), and
+  `uv_metrics` (angle and density distortion, seams, islands, flips, grain). `subdiv.unsubdivide(trace=...)` records
+  the levels.
+- `uvlayout.merge_charts` (merge while a disc with little curvature inside), `uvlayout.trim_layout` (strips onto
+  trim-sheet bands), and the new `masks` module (wear and cavity by area share, midpoint-displacement variation
+  through the recovered levels, diffusion noise).
+- `uvlayout.trim_layout(group=True)` joins adjacent strips by dynamic programming; `masks.exposure` (ambient
+  occlusion by rays through a voxel grid of the solid) and `masks.vertex_normals`.
